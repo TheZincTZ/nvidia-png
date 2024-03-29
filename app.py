@@ -1,76 +1,46 @@
-from langchain.vectorstores import Epsilla
-from pyepsilla import vectordb
-from sentence_transformers import SentenceTransformer
-import streamlit as st
+import os
+import pinecone
+import sys
+from langchain.llms import Replicate
+from langchain.vectorstores import Pinecone
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+from langchain.document_loaders.csv_loader import CSVLoader
 
-import subprocess
-from typing import List
+#API Configurations
+os.environ['REPLICATE_API_TOKEN'] = "r8_CqwlB5wU9EpSZuulDgpqnYEk8deOlBS0MB1U7"
+pinecone.init(api_key='4f5e281c-4de2-468d-b512-a35f4b39097a', environment='gcp-starter')
 
-# Local embedding model for embedding the question.
-model = SentenceTransformer('all-MiniLM-L6-v2')
+loader = CSVLoader(file_path="\doc\translated_reviews_3.csv")
+documents = loader.load()
 
-class LocalEmbeddings():
-  def embed_query(self, text: str) -> List[float]:
-    return model.encode(text).tolist()
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+texts = text_splitter.split_documents(documents)
 
-embeddings = LocalEmbeddings()
+embeddings = HuggingFaceEmbeddings()
 
-# Connect to Epsilla as knowledge base.
-client = vectordb.Client()
-vector_store = Epsilla(
-  client,
-  embeddings,
-  db_path="/tmp/localchatdb",
-  db_name="LocalChatDB"
+index_name = "nvidia"
+index = pinecone.Index(index_name)
+vectordb = Pinecone.from_documents(texts, embeddings, index_name=index_name)
+
+llm = Replicate(
+    model="a16z-infra/llama13b-v2-chat:df7690f1994d94e96ad9d568eac121aecf50684a0b0963b25a41cc40061269e5",
+    input={"temperature": 0.75, "max_length": 3000}
 )
-vector_store.use_collection("LocalChatCollection")
 
-# The 1st welcome message
-st.title("💬 Chatbot")
-if "messages" not in st.session_state:
-  st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?"}]
+qa_chain = ConversationalRetrievalChain.from_llm(
+    llm,
+    vectordb.as_retriever(search_kwargs={'k': 2}),
+    return_source_documents=True
+)
 
-# A fixture of chat history
-for msg in st.session_state.messages:
-  st.chat_message(msg["role"]).write(msg["content"])
-
-# Answer user question upon receiving
-if question := st.chat_input():
-  st.session_state.messages.append({"role": "user", "content": question})
-
-  context = '\n'.join(map(lambda doc: doc.page_content, vector_store.similarity_search(question, k = 5)))
-
-  st.chat_message("user").write(question)
-
-  # Here we use prompt engineering to ingest the most relevant pieces of chunks from knowledge into the prompt.
-  prompt = f'''
-    Answer the Question based on the given Context. Try to understand the Context and rephrase them.
-    Please don't make things up or say things not mentioned in the Context. Ask for more information when needed.
-
-    Context:
-    {context}
-
-    Question:
-    {question}
-
-    Answer:
-    '''
-  print(prompt)
-
-  # Call the local LLM and wait for the generation to finish. This is just a quick demo and we can improve it
-  # with better ways in the future.
-  command = ['llm', '-m', 'llama-2-7b-chat', prompt]
-  process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-  content = ''
-  while True:
-    output = process.stdout.readline()
-    if output:
-      content = content + output
-    return_code = process.poll()
-    if return_code is not None:
-      break
-
-  # Append the response
-  msg = { 'role': 'assistant', 'content': content }
-  st.session_state.messages.append(msg)
-  st.chat_message("assistant").write(msg['content'])
+chat_history = []
+while True:
+    query = input('Prompt: ')
+    if query == "exit" or query == "quit" or query == "q":
+        print('Exiting')
+        sys.exit()
+    result = qa_chain({'question': query, 'chat_history': chat_history})
+    print('Answer: ' + result['answer'] + '\n')
+    chat_history.append((query, result['answer']))
